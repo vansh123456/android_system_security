@@ -23,6 +23,8 @@
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
 #include <hidl/HidlTransportSupport.h>
+#include <keymasterV4_0/Keymaster3.h>
+#include <keymasterV4_0/Keymaster4.h>
 #include <utils/StrongPointer.h>
 #include <wifikeystorehal/keystore.h>
 
@@ -30,8 +32,6 @@
 #include <keystore/keystore_return_types.h>
 
 #include "KeyStore.h"
-#include "Keymaster3.h"
-#include "Keymaster4.h"
 #include "entropy.h"
 #include "key_store_service.h"
 #include "legacy_keymaster_device_wrapper.h"
@@ -54,9 +54,9 @@ using ::android::hardware::keymaster::V4_0::SecurityLevel;
 using ::android::hardware::keymaster::V4_0::HmacSharingParameters;
 using ::android::hardware::keymaster::V4_0::ErrorCode;
 
-using keystore::Keymaster;
-using keystore::Keymaster3;
-using keystore::Keymaster4;
+using ::keystore::keymaster::support::Keymaster;
+using ::keystore::keymaster::support::Keymaster3;
+using ::keystore::keymaster::support::Keymaster4;
 
 using keystore::KeymasterDevices;
 
@@ -72,7 +72,7 @@ KeymasterDevices enumerateKeymasterDevices(IServiceManager* serviceManager) {
                               << Wrapper::WrappedIKeymasterDevice::descriptor
                               << "\" with interface name \"" << name << "\"";
 
-                sp<Keymaster> kmDevice(new Wrapper(device));
+                sp<Keymaster> kmDevice(new Wrapper(device, name));
                 auto halVersion = kmDevice->halVersion();
                 SecurityLevel securityLevel = halVersion.securityLevel;
                 LOG(INFO) << "found " << Wrapper::WrappedIKeymasterDevice::descriptor
@@ -175,7 +175,7 @@ KeymasterDevices initializeKeymasters() {
     if (!result[SecurityLevel::SOFTWARE]) {
         auto fbdev = android::keystore::makeSoftwareKeymasterDevice();
         CHECK(fbdev.get()) << "Unable to create Software Keymaster Device";
-        result[SecurityLevel::SOFTWARE] = new keystore::Keymaster3(fbdev);
+        result[SecurityLevel::SOFTWARE] = new Keymaster3(fbdev, "Software");
     }
     return result;
 }
@@ -197,8 +197,6 @@ int main(int argc, char* argv[]) {
     CHECK(configure_selinux() != -1) << "Failed to configure SELinux.";
 
     auto halVersion = kmDevices[SecurityLevel::TRUSTED_ENVIRONMENT]->halVersion();
-    CHECK(halVersion.error == keystore::ErrorCode::OK)
-        << "Error " << toString(halVersion.error) << " getting HAL version";
 
     // If the hardware is keymaster 2.0 or higher we will not allow the fallback device for import
     // or generation of keys. The fallback device is only used for legacy keys present on the

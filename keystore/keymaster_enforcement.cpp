@@ -335,8 +335,11 @@ ErrorCode KeymasterEnforcement::AuthorizeBegin(const KeyPurpose purpose, const k
 
         /* Tags that are implicitly verified by secure side */
         case Tag::APPLICATION_ID:
-        case Tag::OS_VERSION:
+        case Tag::BOOT_PATCHLEVEL:
         case Tag::OS_PATCHLEVEL:
+        case Tag::OS_VERSION:
+        case Tag::TRUSTED_USER_PRESENCE_REQUIRED:
+        case Tag::VENDOR_PATCHLEVEL:
 
         /* TODO(swillden): Handle these */
         case Tag::INCLUDE_UNIQUE_ID:
@@ -344,6 +347,8 @@ ErrorCode KeymasterEnforcement::AuthorizeBegin(const KeyPurpose purpose, const k
         case Tag::RESET_SINCE_ID_ROTATION:
         case Tag::ALLOW_WHILE_ON_BODY:
         case Tag::HARDWARE_TYPE:
+        case Tag::TRUSTED_CONFIRMATION_REQUIRED:
+        case Tag::CONFIRMATION_TOKEN:
             break;
 
         case Tag::BOOTLOADER_ONLY:

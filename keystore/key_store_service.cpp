@@ -55,6 +55,7 @@ using android::security::keymaster::KeymasterArguments;
 using android::security::keymaster::KeymasterBlob;
 using android::security::keymaster::KeymasterCertificateChain;
 using android::security::keymaster::OperationResult;
+using ConfirmationResponseCode = android::hardware::confirmationui::V1_0::ResponseCode;
 
 constexpr size_t kMaxOperations = 15;
 constexpr double kIdRotationPeriod = 30 * 24 * 60 * 60; /* Thirty days, in seconds */
@@ -138,6 +139,7 @@ void KeyStoreService::binderDied(const wp<IBinder>& who) {
         int32_t unused_result;
         abort(token, &unused_result);
     }
+    mConfirmationManager->binderDied(who);
 }
 
 Status KeyStoreService::getState(int32_t userId, int32_t* aidl_return) {
@@ -663,77 +665,6 @@ Status KeyStoreService::getmtime(const String16& name, int32_t uid, int64_t* tim
     }
 
     *time = static_cast<int64_t>(s.st_mtime);
-    return Status::ok();
-}
-
-// TODO(tuckeris): This is dead code, remove it.  Don't bother copying over key characteristics here
-Status KeyStoreService::duplicate(const String16& srcKey, int32_t srcUid, const String16& destKey,
-                                  int32_t destUid, int32_t* aidl_return) {
-    uid_t callingUid = IPCThreadState::self()->getCallingUid();
-    pid_t spid = IPCThreadState::self()->getCallingPid();
-    if (!has_permission(callingUid, P_DUPLICATE, spid)) {
-        ALOGW("permission denied for %d: duplicate", callingUid);
-        *aidl_return = static_cast<int32_t>(ResponseCode::PERMISSION_DENIED);
-        return Status::ok();
-    }
-
-    State state = mKeyStore->getState(get_user_id(callingUid));
-    if (!isKeystoreUnlocked(state)) {
-        ALOGD("calling duplicate in state: %d", state);
-        *aidl_return = static_cast<int32_t>(ResponseCode(state));
-        return Status::ok();
-    }
-
-    if (srcUid == -1 || static_cast<uid_t>(srcUid) == callingUid) {
-        srcUid = callingUid;
-    } else if (!is_granted_to(callingUid, srcUid)) {
-        ALOGD("migrate not granted from source: %d -> %d", callingUid, srcUid);
-        *aidl_return = static_cast<int32_t>(ResponseCode::PERMISSION_DENIED);
-        return Status::ok();
-    }
-
-    if (destUid == -1) {
-        destUid = callingUid;
-    }
-
-    if (srcUid != destUid) {
-        if (static_cast<uid_t>(srcUid) != callingUid) {
-            ALOGD("can only duplicate from caller to other or to same uid: "
-                  "calling=%d, srcUid=%d, destUid=%d",
-                  callingUid, srcUid, destUid);
-            *aidl_return = static_cast<int32_t>(ResponseCode::PERMISSION_DENIED);
-            return Status::ok();
-        }
-
-        if (!is_granted_to(callingUid, destUid)) {
-            ALOGD("duplicate not granted to dest: %d -> %d", callingUid, destUid);
-            *aidl_return = static_cast<int32_t>(ResponseCode::PERMISSION_DENIED);
-            return Status::ok();
-        }
-    }
-
-    String8 source8(srcKey);
-    String8 sourceFile(mKeyStore->getKeyNameForUidWithDir(source8, srcUid, ::TYPE_ANY));
-
-    String8 target8(destKey);
-    String8 targetFile(mKeyStore->getKeyNameForUidWithDir(target8, destUid, ::TYPE_ANY));
-
-    if (access(targetFile.string(), W_OK) != -1 || errno != ENOENT) {
-        ALOGD("destination already exists: %s", targetFile.string());
-        *aidl_return = static_cast<int32_t>(ResponseCode::SYSTEM_ERROR);
-        return Status::ok();
-    }
-
-    Blob keyBlob;
-    ResponseCode responseCode =
-        mKeyStore->get(sourceFile.string(), &keyBlob, TYPE_ANY, get_user_id(srcUid));
-    if (responseCode != ResponseCode::NO_ERROR) {
-        *aidl_return = static_cast<int32_t>(responseCode);
-        return Status::ok();
-    }
-
-    *aidl_return =
-        static_cast<int32_t>(mKeyStore->put(targetFile.string(), &keyBlob, get_user_id(destUid)));
     return Status::ok();
 }
 
@@ -1359,6 +1290,23 @@ Status KeyStoreService::begin(const sp<IBinder>& appToken, const String16& name,
     return Status::ok();
 }
 
+void KeyStoreService::appendConfirmationTokenIfNeeded(const KeyCharacteristics& keyCharacteristics,
+                                                      std::vector<KeyParameter>* params) {
+    if (!(containsTag(keyCharacteristics.softwareEnforced, Tag::TRUSTED_CONFIRMATION_REQUIRED) ||
+          containsTag(keyCharacteristics.hardwareEnforced, Tag::TRUSTED_CONFIRMATION_REQUIRED))) {
+        return;
+    }
+
+    hidl_vec<uint8_t> confirmationToken = mConfirmationManager->getLatestConfirmationToken();
+    if (confirmationToken.size() == 0) {
+        return;
+    }
+
+    params->push_back(
+        Authorization(keymaster::TAG_CONFIRMATION_TOKEN, std::move(confirmationToken)));
+    ALOGD("Appending confirmation token\n");
+}
+
 Status KeyStoreService::update(const sp<IBinder>& token, const KeymasterArguments& params,
                                const ::std::vector<uint8_t>& data, OperationResult* result) {
     if (!checkAllowedOperationParams(params.getParameters())) {
@@ -1387,6 +1335,9 @@ Status KeyStoreService::update(const sp<IBinder>& token, const KeymasterArgument
         false /* is_begin_operation */);
     if (!result->resultCode.isOk()) return Status::ok();
 
+    std::vector<KeyParameter> inParams = params.getParameters();
+    appendConfirmationTokenIfNeeded(op.characteristics, &inParams);
+
     auto hidlCb = [&](ErrorCode ret, uint32_t inputConsumed,
                       const hidl_vec<KeyParameter>& outParams,
                       const ::std::vector<uint8_t>& output) {
@@ -1398,8 +1349,8 @@ Status KeyStoreService::update(const sp<IBinder>& token, const KeymasterArgument
         }
     };
 
-    KeyStoreServiceReturnCode rc = KS_HANDLE_HIDL_ERROR(op.device->update(
-        op.handle, params.getParameters(), data, authToken, VerificationToken(), hidlCb));
+    KeyStoreServiceReturnCode rc = KS_HANDLE_HIDL_ERROR(
+        op.device->update(op.handle, inParams, data, authToken, VerificationToken(), hidlCb));
 
     // just a reminder: on success result->resultCode was set in the callback. So we only overwrite
     // it if there was a communication error indicated by the ErrorCode.
@@ -1438,6 +1389,9 @@ Status KeyStoreService::finish(const sp<IBinder>& token, const KeymasterArgument
     key_auths.append(op.characteristics.softwareEnforced.begin(),
                      op.characteristics.softwareEnforced.end());
 
+    std::vector<KeyParameter> inParams = params.getParameters();
+    appendConfirmationTokenIfNeeded(op.characteristics, &inParams);
+
     result->resultCode = enforcement_policy.AuthorizeOperation(
         op.purpose, op.keyid, key_auths, params.getParameters(), authToken, op.handle,
         false /* is_begin_operation */);
@@ -1453,7 +1407,7 @@ Status KeyStoreService::finish(const sp<IBinder>& token, const KeymasterArgument
     };
 
     KeyStoreServiceReturnCode rc = KS_HANDLE_HIDL_ERROR(
-        op.device->finish(op.handle, params.getParameters(),
+        op.device->finish(op.handle, inParams,
                           ::std::vector<uint8_t>() /* TODO(swillden): wire up input to finish() */,
                           signature, authToken, VerificationToken(), hidlCb));
     mOperationMap.removeOperation(token);
@@ -1761,13 +1715,10 @@ Status KeyStoreService::importWrappedKey(
         error = mKeyStore->put(filename.string(), &ksBlob, get_user_id(callingUid));
     };
 
-    // TODO b/70904859 sanitize params and forward to keymaster
-    // forward rootSid and fingerprintSid
-    (void)params;
-    (void)rootSid;
-    (void)fingerprintSid;
-    rc = KS_HANDLE_HIDL_ERROR(
-        dev->importWrappedKey(wrappedKey, hidlWrappingKey, maskingKey, hidlCb));
+    rc = KS_HANDLE_HIDL_ERROR(dev->importWrappedKey(wrappedKey, hidlWrappingKey, maskingKey,
+                                                    params.getParameters(), rootSid, fingerprintSid,
+                                                    hidlCb));
+
     // possible hidl error
     if (!rc.isOk()) {
         return AIDL_RETURN(rc);
@@ -1794,6 +1745,20 @@ Status KeyStoreService::importWrappedKey(
     charBlob.setSecurityLevel(securityLevel);
 
     return AIDL_RETURN(mKeyStore->put(cFilename.string(), &charBlob, get_user_id(callingUid)));
+}
+
+Status KeyStoreService::presentConfirmationPrompt(const sp<IBinder>& listener,
+                                                  const String16& promptText,
+                                                  const ::std::vector<uint8_t>& extraData,
+                                                  const String16& locale, int32_t uiOptionsAsFlags,
+                                                  int32_t* aidl_return) {
+    return mConfirmationManager->presentConfirmationPrompt(listener, promptText, extraData, locale,
+                                                           uiOptionsAsFlags, aidl_return);
+}
+
+Status KeyStoreService::cancelConfirmationPrompt(const sp<IBinder>& listener,
+                                                 int32_t* aidl_return) {
+    return mConfirmationManager->cancelConfirmationPrompt(listener, aidl_return);
 }
 
 /**
