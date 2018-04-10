@@ -39,7 +39,7 @@ class KeyStoreService : public android::security::BnKeystoreService,
   public:
     explicit KeyStoreService(KeyStore* keyStore)
         : mKeyStore(keyStore), mOperationMap(this),
-          mConfirmationManager(new ConfirmationManager(this)) {}
+          mConfirmationManager(new ConfirmationManager(this)), mActiveUserId(0) {}
     virtual ~KeyStoreService() = default;
 
     void binderDied(const android::wp<android::IBinder>& who);
@@ -177,6 +177,9 @@ class KeyStoreService : public android::security::BnKeystoreService,
                              int32_t* _aidl_return) override;
     ::android::binder::Status isConfirmationPromptSupported(bool* _aidl_return) override;
 
+    ::android::binder::Status onKeyguardVisibilityChanged(bool isShowing, int32_t userId,
+                                                          int32_t* _aidl_return);
+
   private:
     static const int32_t UID_SELF = -1;
 
@@ -297,6 +300,7 @@ class KeyStoreService : public android::security::BnKeystoreService,
     android::sp<ConfirmationManager> mConfirmationManager;
     keystore::AuthTokenTable mAuthTokenTable;
     KeystoreKeymasterEnforcement enforcement_policy;
+    int32_t mActiveUserId;
 };
 
 };  // namespace keystore

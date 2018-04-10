@@ -367,6 +367,7 @@ Status KeyStoreService::lock(int32_t userId, int32_t* aidl_return) {
         return Status::ok();
     }
 
+    enforcement_policy.set_device_locked(true, userId);
     mKeyStore->lock(userId);
     *aidl_return = static_cast<int32_t>(ResponseCode::NO_ERROR);
     return Status::ok();
@@ -395,6 +396,7 @@ Status KeyStoreService::unlock(int32_t userId, const String16& pw, int32_t* aidl
         return Status::ok();
     }
 
+    enforcement_policy.set_device_locked(false, userId);
     const String8 password8(pw);
     // read master key, decrypt with password, initialize mMasterKey*.
     *aidl_return = static_cast<int32_t>(mKeyStore->readMasterKey(password8, userId));
@@ -550,8 +552,11 @@ Status KeyStoreService::sign(const String16& name, const ::std::vector<uint8_t>&
     hidl_vec<uint8_t> legacy_out;
     KeyStoreServiceReturnCode res =
         doLegacySignVerify(name, data, &legacy_out, hidl_vec<uint8_t>(), KeyPurpose::SIGN);
+    if (!res.isOk()) {
+        return Status::fromServiceSpecificError((res));
+    }
     *out = legacy_out;
-    return Status::fromServiceSpecificError((res));
+    return Status::ok();
 }
 
 Status KeyStoreService::verify(const String16& name, const ::std::vector<uint8_t>& data,
@@ -844,6 +849,14 @@ KeyStoreService::generateKey(const String16& name, const KeymasterArguments& par
         }
     }
 
+    if (!containsTag(params.getParameters(), Tag::USER_ID)) {
+        // Most Java processes don't have access to this tag
+        KeyParameter user_id;
+        user_id.tag = Tag::USER_ID;
+        user_id.f.integer = mActiveUserId;
+        keyCharacteristics.push_back(user_id);
+    }
+
     // Write the characteristics:
     String8 name8(name);
     String8 cFilename(mKeyStore->getKeyNameForUidWithDir(name8, uid, ::TYPE_KEY_CHARACTERISTICS));
@@ -1074,6 +1087,14 @@ KeyStoreService::importKey(const String16& name, const KeymasterArguments& param
     String8 cFilename(mKeyStore->getKeyNameForUidWithDir(name8, uid, ::TYPE_KEY_CHARACTERISTICS));
 
     AuthorizationSet opParams = params.getParameters();
+    if (!containsTag(params.getParameters(), Tag::USER_ID)) {
+        // Most Java processes don't have access to this tag
+        KeyParameter user_id;
+        user_id.tag = Tag::USER_ID;
+        user_id.f.integer = mActiveUserId;
+        opParams.push_back(user_id);
+    }
+
     std::stringstream kcStream;
     opParams.Serialize(&kcStream);
     if (kcStream.bad()) {
@@ -2224,6 +2245,17 @@ KeyStoreServiceReturnCode KeyStoreService::upgradeKeyBlob(const String16& name, 
     }
 
     return error;
+}
+
+Status KeyStoreService::onKeyguardVisibilityChanged(bool isShowing, int32_t userId,
+                                                    int32_t* aidl_return) {
+    enforcement_policy.set_device_locked(isShowing, userId);
+    if (!isShowing) {
+        mActiveUserId = userId;
+    }
+    *aidl_return = static_cast<int32_t>(ResponseCode::NO_ERROR);
+
+    return Status::ok();
 }
 
 }  // namespace keystore
